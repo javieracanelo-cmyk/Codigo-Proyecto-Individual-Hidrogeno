@@ -1,0 +1,78 @@
+#Codigo para el intercambiador de calor 
+import numpy as np
+import math
+from scipy.integrate import solve_ivp
+from CoolProp.CoolProp import PropsSI
+
+
+
+#1)Función para modelar la geometría 
+
+
+#2)Función para definir el coeficiente de transferencia del fluido frío (Hidrógeno)
+def coef_h_h2(m_h2, T_h2, P_h2, A_canal, Dh, L): 
+   
+   #m_h2: caudal másico de hidrógeno [kg/s]
+   #T_h2: temperatura del hidrógeno [K]
+   #P_h2: presión del hidrógeno [Pa]
+   #A_canal: área de transferencia del hidrógeno a través del canal [m²]
+   #Dh: diámetro hidráulico del canal [m]
+   #L: longitud del canal [m]
+
+    #Calculamos las prropiedades de base con Coolprop
+    rho_h2 = PropsSI("Dmass", "T", T_h2, "P", P_h2, "Hydrogen")          #kg/m3
+    mu_h2  = PropsSI("VISCOSITY", "T", T_h2, "P", P_h2, "Hydrogen")      #kg/(m·s)
+    cp_h2  = PropsSI("Cpmass", "T", T_h2, "P", P_h2, "Hydrogen")         #J/(kg·K)
+    k_h2   = PropsSI("CONDUCTIVITY", "T", T_h2, "P", P_h2, "Hydrogen")   #W/(m·K)
+
+
+    #Ahora vemos los numeros adimensionales 
+    u_h2  = m_h2 / (rho_h2 * A_canal)  #velocidad promedio  m/s
+    Re_h2 = rho_h2 * u_h2 * Dh / mu_h2 #n° de Reynolds
+    Pr_h2 = cp_h2 * mu_h2 / k_h2 #n° de Prandtl
+
+    #Nusselt según las correlaciones (citar bien los paper)
+    if Re < 2300.0:
+        #Caso laminar: Correlación de Sieder-Tate
+        L_adim = (L / Dh) / (Re_h2 * Pr_h2)          #longitud adimensional
+        Nu_h2 = 3.63 + 0.086 * ((1 / L_adim**1.33 ) / (1 + 0.1 * Pr_h2 * ((Dh * Re_h2 / L)**0.83))) #n° de Nusselt
+    else:
+        #Caso turbulento: Correlación de Gnielinski con f de Konakov 
+        f = 0.25 * (1.82 * np.log(Re_h2) - 1.5)**(-2) #factor de fricción de Konakov
+        fact = 1   #factor de corrección por variación de propiedades (asumido 1 pq D es mucho menor que L) 
+        Nu_h2 = (((f/2) * (Re_h2 - 1000) * Pr_h2) / (1 + 12.7 * np.sqrt(f/2) * (Pr_h2**(2/3) - 1))) * fact #n° de Nusselt
+
+    #Finalmente el coeficiente de transferencia de h2
+    h_h2 = Nu_h2 * k_h2 / Dh
+
+    return h_h2, Re_h2, Pr_h2, Nu_h2
+    
+#3)Función para definir el coeficiente de transferencia del fluido caliente (Aire)
+def coef_h_air(m_air, T_air, P_air, A_canal, Dh, L):
+    
+    #Calculamos las propiedades con CoolProp (preguntar si puedo ocupar así el fluido=aire)
+    rho_air = PropsSI("Dmass",        "T", T_air, "P", P_air, "Air")         #kg/m^3
+    mu_air  = PropsSI("VISCOSITY",    "T", T_air, "P", P_air, "Air")         #kg/(m·s)
+    cp_air  = PropsSI("Cpmass",       "T", T_air, "P", P_air, "Air")         #J/(kg·K)
+    k_air   = PropsSI("CONDUCTIVITY", "T", T_air, "P", P_air, "Air")         #W/(m·K)
+
+    #Números adimensionales
+    u_air  = m_air / (rho_air * A_canal)          #m/s
+    Re_air = rho_air * u_air * Dh / mu_air        #Reynolds
+    Pr_air = cp_air * mu_air / k_air              #Prandtl
+
+    #Nusselt según las mismas correlaciones
+    if Re_air < 2300.0:
+        #Laminar 
+        L_adim2 = (L / Dh) / (Re_air * Pr_air)     
+        Nu_air = 3.63 + 0.086 * (((1 / L_adim2)**1.33) / (1 + 0.1 * Pr_air * ((Dh * Re_air / L)**0.83)))
+    else:
+        #Turbulento
+        f2 = 0.25 * (1.82 * np.log(Re_air) - 1.5)**(-2)
+        fact2 = 1
+        Nu_air = (((f2/2) * (Re_air - 1000) * Pr_air) / (1 + 12.7 * np.sqrt(f/2) * (Pr_air**(2/3) - 1))) * fact2 
+
+    #Coeficiente de transferencia de calor
+    h_air = Nu_air * k_air / Dh
+
+    return h_air, Re_air, Pr_air, Nu_air
