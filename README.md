@@ -107,7 +107,7 @@ $$\phi = \frac{1}{6} \left( 1 + \sqrt{1 + \gamma^2 \left(\frac{\pi}{2\cos\beta}\
 
 2. Diámetro Hidráulico Corregido ($\mathbf{D_h}$)
 
-El diámetro hidráulico corregido considera el efecto de la corrugación en el flujo [Cita 1]:
+El diámetro hidráulico corregido considera el efecto de la corrugación en el flujo:
 
 $$D_h = \frac{2b}{\phi}$$
 
