@@ -8,7 +8,7 @@ from CoolProp.CoolProp import PropsSI
 
 #Para implementar RK para P 
 # Parámetros Redlich-Kwong para H2
-R = 8.314  # J/(mol·K)  (puedes borrar el R que defines más abajo o dejar solo este)
+R = 8.314  # J/(mol·K)  
 
 Tc_H2 = 33.19      # K  (temperatura crítica del H2, aprox)
 Pc_H2 = 1.296e6    # Pa (presión crítica del H2, aprox)
