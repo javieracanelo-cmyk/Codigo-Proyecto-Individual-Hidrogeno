@@ -1,0 +1,459 @@
+
+#Codigo Tanque + Intercambiador de calor de placas (modelo 1D en el tiempo y a contracorriente)
+
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+from CoolProp.CoolProp import PropsSI
+
+
+#1)Primero se define lo básico para RK
+
+R = 8.314  # J/(mol·K)
+
+Tc_H2 = 33.19      # K  (temperatura crítica del H2)
+Pc_H2 = 1.296e6    # Pa (presión crítica del H2)
+
+#Parámetros RK
+a_RK = 0.42748 * R**2 * Tc_H2**2.5 / Pc_H2
+b_RK = 0.08664 * R * Tc_H2 / Pc_H2
+
+def P_RK(T, n, V):
+    
+    #Presión Redlich-Kwong: P = R T / (v - b) - a / (sqrt(T) v (v + b)),  v = V/n
+    v = V / n  #volumen molar [m³/mol]
+    return R*T/(v - b_RK) - a_RK/(np.sqrt(T)*v*(v + b_RK))
+
+
+#2)Función para la Geometría 
+
+def geometria():
+    #Parámetros del metal (las placas)
+    cpw = 500          # J/(kg·K)
+    rhow = 8000        # kg/m³
+    espesor = 0.0008   # m
+    distancia_placas = 0.01  # m
+    beta = 10.041 * math.pi / 180
+    longitud_placas = 0.381  # m
+    ancho_placas = 0.175     # m
+
+    #Parámetros del intercambiador
+    n_placas = 180
+    espacio_placas = 0.0022352 - espesor
+    n_canales = n_placas - 1
+    n_canales_frio = math.floor(n_canales / 2)
+    n_canales_caliente = math.ceil(n_canales / 2)
+    A_canal = ancho_placas * espacio_placas
+
+    #Volúmenes de fluido
+    A_canal_frio = A_canal * n_canales_frio
+    v_frio = A_canal_frio * longitud_placas
+    A_canal_caliente = A_canal * n_canales_caliente
+    v_caliente = A_canal_caliente * longitud_placas
+
+    #Corrugación
+    gamma = 2 * espacio_placas / distancia_placas
+    phi = (1.0 / 6.0) * (
+        1
+        + (1 + gamma**2 * (math.pi / (2 * math.cos(beta))**2))
+        + 4 * (1 + gamma**2 * (math.pi / (2 * math.sqrt(2) * math.cos(beta))**2))**0.5
+    )
+
+    Dh_w = 2 * espacio_placas / phi  #diámetro hidráulico corregido
+
+    #Área real de transferencia
+    A_real = (n_placas - 2) * ancho_placas * longitud_placas * phi
+
+    #masa y capacidad térmica de las placas
+    m_totw = rhow * espesor * ancho_placas * longitud_placas * n_placas * phi
+    C_w = m_totw * cpw
+
+    #Parámetros externos del intercambiador
+    L = longitud_placas
+    W = ancho_placas
+    H = n_placas * distancia_placas
+    A_IC = 2 * (L * W + W * H + H * L)
+
+    return Dh_w, A_canal_frio, A_canal_caliente, A_real, C_w, A_IC, v_frio, v_caliente, n_canales, m_totw
+
+
+#Funciones de los coeficientes de transferencia de calor 
+#3)Coeficiente de transferencia del fluido H2
+
+
+def coef_h_h2(m_h2, T_h2, P_h2, A_canal, Dh, L):
+    rho_h2 = PropsSI("Dmass", "T", T_h2, "P", P_h2, "Hydrogen")
+    mu_h2  = PropsSI("VISCOSITY", "T", T_h2, "P", P_h2, "Hydrogen")
+    cp_h2  = PropsSI("Cpmass", "T", T_h2, "P", P_h2, "Hydrogen")
+    k_h2   = PropsSI("CONDUCTIVITY", "T", T_h2, "P", P_h2, "Hydrogen")
+
+    u_h2  = m_h2 / (rho_h2 * A_canal)
+    Re_h2 = rho_h2 * u_h2 * Dh / mu_h2
+    Pr_h2 = cp_h2 * mu_h2 / k_h2
+
+    if Re_h2 < 2300.0:
+        L_adim = (L / Dh) / (Re_h2 * Pr_h2)
+        Nu_h2 = 3.63 + 0.086 * ((1 / L_adim**1.33) /
+                                (1 + 0.1 * Pr_h2 * ((Dh * Re_h2 / L)**0.83)))
+    else:
+        f = 0.25 * (1.82 * np.log(Re_h2) - 1.5)**(-2)
+        fact = 1
+        Nu_h2 = (((f/2) * (Re_h2 - 1000) * Pr_h2) /
+                 (1 + 12.7 * np.sqrt(f/2) * (Pr_h2**(2/3) - 1))) * fact
+
+    h_h2 = Nu_h2 * k_h2 / Dh
+    return h_h2, Re_h2, Pr_h2, Nu_h2
+
+
+#4)Coeficiente de transferencia del fluido aire
+def coef_h_air(m_air, T_air, P_air, A_canal, Dh, L):
+    rho_air = PropsSI("Dmass",        "T", T_air, "P", P_air, "Air")
+    mu_air  = PropsSI("VISCOSITY",    "T", T_air, "P", P_air, "Air")
+    cp_air  = PropsSI("Cpmass",       "T", T_air, "P", P_air, "Air")
+    k_air   = PropsSI("CONDUCTIVITY", "T", T_air, "P", P_air, "Air")
+
+    u_air  = m_air / (rho_air * A_canal)
+    Re_air = rho_air * u_air * Dh / mu_air
+    Pr_air = cp_air * mu_air / k_air
+
+    if Re_air < 2300.0:
+        L_adim2 = (L / Dh) / (Re_air * Pr_air)
+        Nu_air = 3.63 + 0.086 * (((1 / L_adim2)**1.33) /
+                                 (1 + 0.1 * Pr_air * ((Dh * Re_air / L)**0.83)))
+    else:
+        f2 = 0.25 * (1.82 * np.log(Re_air) - 1.5)**(-2)
+        fact2 = 1
+        Nu_air = (((f2/2) * (Re_air - 1000) * Pr_air) /
+                  (1 + 12.7 * np.sqrt(f2/2) * (Pr_air**(2/3) - 1))) * fact2
+
+    h_air = Nu_air * k_air / Dh
+    return h_air, Re_air, Pr_air, Nu_air
+
+
+#4)Modelación del tanque 
+
+def calc_T_P_tanque(n, nh, V, M_H2, T_guess):
+    
+    #A partir de n y nh (entalpía total), calcula T_tanque y P_tanque (RK) usando CoolProp para h(T,P) y RK para P(T,n,V).
+    
+    if n < 1e-6:
+        return T_guess, 0.0
+
+    h_mol  = nh / n
+    h_mass = h_mol / M_H2
+
+    Titer = T_guess
+    tol = 1e-3
+
+    for _ in range(20):
+        Piter = P_RK(Titer, n, V)
+        try:
+            Tnew = PropsSI("T", "Hmass", h_mass, "P", Piter, "Hydrogen")
+        except ValueError:
+            Tnew = Titer
+            break
+        if abs(Tnew - Titer) < tol:
+            Titer = Tnew
+            break
+        Titer = Tnew
+
+    T_tanque = Titer
+    P_tanque = P_RK(T_tanque, n, V)
+    return T_tanque, P_tanque
+
+
+#5)Ahora la función que modela el sistema acoplado
+
+def sistema_acoplado(t, y, pars):
+   
+
+    #Primero se resuelve el tanque
+    N = pars["Nseg"]
+
+    n  = y[0]    #moles en el tanque
+    nh = y[1]    #entalpía total en el tanque [J]
+
+    V      = pars["V"]
+    Utw    = pars["Utw"]
+    T_amb  = pars["T_amb"]
+    M_H2   = pars["M_H2"]
+    T0     = pars["T0"]
+    m_dot_in_tk  = pars["m_dot_in_tk"]
+    m_dot_out_tk = pars["m_dot_out_tk"]
+    T_in_tk      = pars["T_in_tk"]
+    P_in_tk      = pars["P_in_tk"]
+
+    #Temperatura y presión del tanque ocupando RK + CoolProp
+    T_tanque, P_tanque = calc_T_P_tanque(n, nh, V, M_H2, T0)
+
+    #Geometría del tanque para calcular pérdidas de calor
+    d = (4 * V / (3 * np.pi))**(1/3)
+    r = d / 2
+    Lc = 3 * d
+    As = 2*np.pi*r**2 + 2*np.pi*r*Lc
+
+    #Entalpías de entrada y salida
+    h_in_mass = PropsSI('Hmass', 'T', T_in_tk, 'P', P_in_tk, 'Hydrogen')
+    h_in  = h_in_mass * M_H2
+    h_out = nh/n if n > 1e-6 else 0.0
+
+    dn_dt  = (m_dot_in_tk  / M_H2) - (m_dot_out_tk / M_H2)
+    Q_loss = Utw * As * (T_tanque - T_amb)
+    dnh_dt = (m_dot_in_tk / M_H2 * h_in) - \
+             (m_dot_out_tk / M_H2 * h_out) - \
+             Q_loss
+
+    #Luego se resuelve el intercambiador de calor 1D a contracorriente
+    Tc = y[2:2+N]          #T del H2 en cada segmento
+    Tw = y[2+N:2+2*N]      #T de la pared en cada segmento
+    Th = y[2+2*N:2+3*N]    #T del aire en cada segmento
+
+    #Limitar temperaturas para CoolProp
+    Tc = np.clip(Tc, 200.0, 2000.0)
+    Tw = np.clip(Tw, 200.0, 2000.0)
+    Th = np.clip(Th, 200.0, 2000.0)
+
+    #Parámetros de operación del intercambiador
+    geo = pars["geo"]
+    Dh_w, A_canal_frio, A_canal_caliente, A_real, C_w, A_IC, v_frio, v_caliente, n_canales, m_totw = geo
+
+    v_frio_seg     = v_frio     / N
+    v_caliente_seg = v_caliente / N
+    C_w_seg        = C_w        / N
+    A_seg          = A_real     / N
+
+    #Caudales (el frío viene del tanque)
+    m_dot_c = m_dot_out_tk
+    m_dot_h = pars["m_dot_in_aire"]
+
+    #Presiones promedio (la presión fría se toma desde la que sale del tanque)
+    DELTA_P = pars["DELTA_P"]
+    Pc_avg  = max(P_tanque - DELTA_P/2.0, 1e5)   #evitar P < 1 bar
+    Ph_avg  = pars["Ph_avg"]
+
+    #Entradas de temperatura al intercambiador
+    Tc_in = T_tanque          #entrada del H2 en x = 0 es la T del tanque
+    Th_in = pars["T_in_aire"] #entrada del aire en x = L (contracorriente)
+
+    L_HE = pars["L_HE"]
+
+    dTc_dt = np.zeros(N)
+    dTw_dt = np.zeros(N)
+    dTh_dt = np.zeros(N)
+
+    for j in range(N):
+        Tc_j = Tc[j]
+        Tw_j = Tw[j]
+        Th_j = Th[j]
+
+        #Propiedades locales
+        rho_c = PropsSI("Dmass", "T", Tc_j, "P", Pc_avg, "Hydrogen")
+        cp_c  = PropsSI("Cpmass","T", Tc_j, "P", Pc_avg, "Hydrogen")
+        rho_h = PropsSI("Dmass", "T", Th_j, "P", Ph_avg, "Air")
+        cp_h  = PropsSI("Cpmass","T", Th_j, "P", Ph_avg, "Air")
+
+        mcp_c = rho_c * v_frio_seg     * cp_c
+        mcp_h = rho_h * v_caliente_seg * cp_h
+
+        #Para tener lo coeficientes de transferencia de calor
+        h_c, _, _, _ = coef_h_h2(m_dot_c, Tc_j, Pc_avg, A_canal_frio,     Dh_w, L_HE)
+        h_h, _, _, _ = coef_h_air(m_dot_h, Th_j, Ph_avg, A_canal_caliente, Dh_w, L_HE)
+
+        #Condiciones de borde en contracorriente
+        #H2 frío: x = 0 -> L
+        if j == 0:
+            Tc_up = Tc_in
+        else:
+            Tc_up = Tc[j-1]
+
+        #Aire caliente: x = L -> 0
+        if j == (N - 1):
+            Th_up = Th_in
+        else:
+            Th_up = Th[j+1]
+
+        #Ecuaciones diferenciales se definen para cada segmento 
+        dTc_dt[j] = ( m_dot_c*cp_c*(Tc_up - Tc_j) + A_seg*h_c*(Tw_j - Tc_j) ) / mcp_c
+        dTh_dt[j] = ( m_dot_h*cp_h*(Th_up - Th_j) - A_seg*h_h*(Th_j - Tw_j) ) / mcp_h
+        dTw_dt[j] = ( A_seg*h_h*(Th_j - Tw_j) - A_seg*h_c*(Tw_j - Tc_j) ) / C_w_seg
+
+    #Armar el vector de derivadas completo
+    return np.concatenate([[dn_dt, dnh_dt], dTc_dt, dTw_dt, dTh_dt])
+
+
+#6)Función para correr el sistema
+
+def correr_sistema_acoplado(DELTA_P=500.0, Nseg=10):
+
+    #Datos del tanque 
+    M_H2 = 2.016e-3   #kg/mol (Masa molar hidrógeno)
+    Deltat = 4*3600   #s (Tiempo de operación de la celda de combustible)
+    v_h2 = -1         #coeficiente estequeométrico (negativo porque es consumo de H2)
+    i_fuelcell = 3500 #A/m² Corriente de la celda de combustible
+    A_cell = 0.0088208 #m² Área activa de la celda de combustible
+    n_e = 2           #n° de electrones transferidos por mol de H2
+    UF = 0.7          #Factor de utilización del hidrógeno
+    Ncell = 68        #Número de celdas por stack
+    Nstacks = 10      #Número de stacks por arreglo 
+    Narrays = 10      #Número de arreglos por módulo
+    Nmod = 1          #Número de módulos
+
+    m0 = Deltat*((abs(v_h2)*i_fuelcell*A_cell*M_H2)/(n_e*96485*UF))*Ncell*Nstacks*Narrays*Nmod
+    n0 = m0 / M_H2    #moles de hidrógeno inicial en el tanque
+
+    #Condiciones iniciales del tanque
+    T0 = 273.15 + 40.0   #K
+    P0 = 70e5            #Pa
+
+    #Constantes del tanque 
+    rho0 = PropsSI('D', 'T', T0, 'P', P0, 'Hydrogen') #kg/m³
+    V = m0/rho0          #m³ (volumen del tanque)
+    Utw = 5.0            #W/(m²·K)
+    T_amb = 25 + 273.15  #K
+
+    #En caso de que haya una entrada al tanque (para el futuro)
+    T_in_tk = 293.15     #K 
+    P_in_tk = 1e5        #Pa 
+    m_dot_in_tk = 0.0    #kg/s
+    m_dot_out_tk = 0.005 #kg/s (esta salida es el caudal frío del intercambiador)
+
+    #Cálculo de entalpía inicial en el tanque
+    h0_mass = PropsSI('Hmass', 'T', T0, 'P', P0, 'Hydrogen') #J/kg
+    h0_mol  = h0_mass * M_H2 #J/mol
+    n_h0    = n0 * h0_mol    #J
+
+    #Datos del intercambiador (condiciones de entrada de aire)
+    T_in_aire = 750.0 + 273.15      #K
+    P_in_aire = 1.0e5               #Pa
+    m_dot_in_aire = 0.1885          #kg/s
+
+    #Presiones promedio en el intercambiador (considerando caída de presión)
+    Ph_avg = P_in_aire - DELTA_P/2.0
+
+    #Para ocupar la función de geometría
+    geo = geometria()
+
+    #Condiciones iniciales en el intercambiador
+    Tc0 = np.full(Nseg, T0)                        #H2 inicial igual a la T del tanque
+    Th0 = np.full(Nseg, T_in_aire)                 #aire inicial
+    Tw0 = np.full(Nseg, 0.5*(T0 + T_in_aire))      #pared inicial
+
+    #Vector de estado inicial completo
+    y0 = np.concatenate([[n0, n_h0], Tc0, Tw0, Th0])
+
+    #Definir parámetros para la función del sistema acoplado
+    pars = {
+        "Nseg": Nseg,
+        "V": V,
+        "Utw": Utw,
+        "T_amb": T_amb,
+        "M_H2": M_H2,
+        "T0": T0,
+        "m_dot_in_tk": m_dot_in_tk,
+        "m_dot_out_tk": m_dot_out_tk,
+        "T_in_tk": T_in_tk,
+        "P_in_tk": P_in_tk,
+        "geo": geo,
+        "m_dot_in_aire": m_dot_in_aire,
+        "DELTA_P": DELTA_P,
+        "Ph_avg": Ph_avg,
+        "T_in_aire": T_in_aire,
+        "L_HE": 0.381
+    }
+
+    #Para definir el tiempo de simulación
+    t_span = (0.0, 7200.0)
+    t_eval = np.linspace(*t_span, 300)
+
+    #Acá se resuelve el sistema (Radau pq son ecuaciones diferenciales rígidas, a distinta escala, hay muchas ecuaciones diferenciales)
+    sol = solve_ivp(
+        sistema_acoplado,
+        t_span,
+        y0,
+        method="Radau",
+        t_eval=t_eval,
+        args=(pars,),
+        rtol=1e-6,
+        atol=1e-8
+    )
+
+    return sol, pars
+
+
+#7)Gráficos
+
+def post_proceso(sol, pars):
+    t = sol.t
+    N = pars["Nseg"]
+    M_H2 = pars["M_H2"]
+    V = pars["V"]
+    T0 = pars["T0"]
+
+    #Variables del tanque
+    n_t  = sol.y[0, :]
+    nh_t = sol.y[1, :]
+
+    T_t = np.zeros_like(t)
+    P_t = np.zeros_like(t)
+
+    T_guess = T0
+    for i in range(len(t)): #Para sacar T y P en cada tiempo
+        T_i, P_i = calc_T_P_tanque(n_t[i], nh_t[i], V, M_H2, T_guess)
+        T_t[i] = T_i
+        P_t[i] = P_i
+        T_guess = T_i
+
+    m_t = n_t * M_H2  #Masa en kg
+
+    #Gráficos del tanque
+    # 1) Temperatura 
+    plt.figure(figsize=(8,4))
+    plt.plot(t, T_t, color='red', linewidth=2, label='T (K)')
+    plt.xlabel('Tiempo (s)'); plt.ylabel('Temperatura (K)')
+    plt.title('Temperatura del tanque'); plt.grid(True); plt.legend()
+    plt.tight_layout(); plt.show()
+
+    # 2) Presión 
+    plt.figure(figsize=(8,4))
+    plt.plot(t, P_t/1e5, color='#1f3b77', linestyle='--', linewidth=2, label='P (bar)')
+    plt.xlabel('Tiempo (s)'); plt.ylabel('Presión (bar)')
+    plt.title('Presión del tanque'); plt.grid(True); plt.legend()
+    plt.tight_layout(); plt.show()
+
+    # 3) Masa 
+    plt.figure(figsize=(8,4))
+    plt.plot(t, m_t, color='green', marker='o', markevery=20, linewidth=1.8, label='m (kg)')
+    plt.xlabel('Tiempo (s)'); plt.ylabel('Masa H$_2$ (kg)')
+    plt.title('Masa de H$_2$ en el tanque'); plt.grid(True); plt.legend()
+    plt.tight_layout(); plt.show()
+
+    #Perfiles de temperatura a lo largoo  del intercambiador 
+    Nseg = N
+    Tc = sol.y[2:2+Nseg, :]
+    Tw = sol.y[2+Nseg:2+2*Nseg, :]
+    Th = sol.y[2+2*Nseg:2+3*Nseg, :]
+
+    x = np.linspace(0.0, pars["L_HE"], Nseg)
+    x_h = x[::-1]   #para poner la curva  del aire en el sentido de su flujo (esto es donde es contracorriente)
+
+    plt.figure(figsize=(8.6, 4.6))
+    plt.plot(x,   Tc[:,-1]-273.15, "-o", label="T_c final (H₂)")
+    plt.plot(x,   Tw[:,-1]-273.15, "-o", label="T_w final (pared)")
+    plt.plot(x_h, Th[:,-1]-273.15, "-o", label="T_h final (aire, contracorriente)")
+    plt.xlabel("Longitud x (m)")
+    plt.ylabel("Temperatura (°C)")
+    plt.title("Perfiles de temperatura (tanque + intercambiador, t final)")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+#8) Para ejecutar todo el sistema completo 
+
+if __name__ == "__main__":
+    sol, pars = correr_sistema_acoplado(DELTA_P=500.0, Nseg=10)
+    post_proceso(sol, pars)
+
+##Se pueden revisar los códigos por separado para ver más exactitud en cada paso 

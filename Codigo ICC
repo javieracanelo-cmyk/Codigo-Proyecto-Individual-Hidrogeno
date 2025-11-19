@@ -1,4 +1,4 @@
-# Intercambiador de calor de placas 1D en el tiempo (contracorriente)
+#Codigo del intercambiador de calor de placas (se hace en 1D en el tiempo y contra correinte para que tenga sentido físico)
 
 import numpy as np
 import math
@@ -7,21 +7,19 @@ from scipy.integrate import solve_ivp
 from CoolProp.CoolProp import PropsSI
 
 
-# ============================================================
-# 1) Geometría (igual que tu función original)
-# ============================================================
+#1)Función para la geometría 
+
 def geometria():
-    # Parámetros del metal (placas)
+    #Parámetros del metal (las placas)
     cpw = 500          # J/(kg·K)
     rhow = 8000        # kg/m³
-    kw = 15.9          # W/(m·K)
     espesor = 0.0008   # m
     distancia_placas = 0.01  # m
     beta = 10.041 * math.pi / 180
     longitud_placas = 0.381  # m
     ancho_placas = 0.175     # m
 
-    # Parámetros del intercambiador
+    #Parámetros del intercambiador
     n_placas = 180
     espacio_placas = 0.0022352 - espesor
     n_canales = n_placas - 1
@@ -29,13 +27,13 @@ def geometria():
     n_canales_caliente = math.ceil(n_canales / 2)
     A_canal = ancho_placas * espacio_placas
 
-    # Volúmenes de fluido
+    #Volúmenes de fluido
     A_canal_frio = A_canal * n_canales_frio
     v_frio = A_canal_frio * longitud_placas
     A_canal_caliente = A_canal * n_canales_caliente
     v_caliente = A_canal_caliente * longitud_placas
 
-    # Corrugación
+    #Corrugación
     gamma = 2 * espacio_placas / distancia_placas
     phi = (1.0 / 6.0) * (
         1
@@ -43,16 +41,16 @@ def geometria():
         + 4 * (1 + gamma**2 * (math.pi / (2 * math.sqrt(2) * math.cos(beta))**2))**0.5
     )
 
-    Dh_w = 2 * espacio_placas / phi  # diámetro hidráulico corregido
+    Dh_w = 2 * espacio_placas / phi  #diámetro hidráulico corregido
 
-    # Área real de transferencia
+    #Área real de transferencia
     A_real = (n_placas - 2) * ancho_placas * longitud_placas * phi
 
-    # Masa y capacidad térmica de las placas
+    #masa y capacidad térmica de las placas
     m_totw = rhow * espesor * ancho_placas * longitud_placas * n_placas * phi
     C_w = m_totw * cpw
 
-    # Para referencia: volumen “externo” del intercambiador
+    #Parametros externos del intercambiador
     L = longitud_placas
     W = ancho_placas
     H = n_placas * distancia_placas
@@ -61,9 +59,9 @@ def geometria():
     return Dh_w, A_canal_frio, A_canal_caliente, A_real, C_w, A_IC, v_frio, v_caliente, n_canales, m_totw
 
 
-# ============================================================
-# 2) Coeficiente de transferencia del fluido frío (H2)
-# ============================================================
+#Funciones de los coeficientes de transferencia de calor 
+#2)Coeficiente de transferencia del fluido H2
+
 def coef_h_h2(m_h2, T_h2, P_h2, A_canal, Dh, L):
     rho_h2 = PropsSI("Dmass", "T", T_h2, "P", P_h2, "Hydrogen")
     mu_h2  = PropsSI("VISCOSITY", "T", T_h2, "P", P_h2, "Hydrogen")
@@ -88,9 +86,8 @@ def coef_h_h2(m_h2, T_h2, P_h2, A_canal, Dh, L):
     return h_h2, Re_h2, Pr_h2, Nu_h2
 
 
-# ============================================================
-# 3) Coeficiente de transferencia del fluido caliente (aire)
-# ============================================================
+#3)Coeficiente de transferencia del fluido aire
+
 def coef_h_air(m_air, T_air, P_air, A_canal, Dh, L):
     rho_air = PropsSI("Dmass",        "T", T_air, "P", P_air, "Air")
     mu_air  = PropsSI("VISCOSITY",    "T", T_air, "P", P_air, "Air")
@@ -115,33 +112,31 @@ def coef_h_air(m_air, T_air, P_air, A_canal, Dh, L):
     return h_air, Re_air, Pr_air, Nu_air
 
 
-# ============================================================
-# 4) Sistema 1D en el tiempo (contracorriente)
-# ============================================================
+#4)Función para modelar el sistema como 1D
 def sistema_1D(t, y, pars):
     N = pars["Nseg"]
 
-    # y = [Tc_0..Tc_{N-1}, Tw_0..Tw_{N-1}, Th_0..Th_{N-1}]
+    #Para sacar las variables de temperatura
     Tc = y[0:N]
     Tw = y[N:2*N]
     Th = y[2*N:3*N]
 
-    # Limitar temperaturas para no romper CoolProp
+    #Limitar temperaturas para CoolProp
     Tc = np.clip(Tc, 200.0, 2000.0)
     Tw = np.clip(Tw, 200.0, 2000.0)
     Th = np.clip(Th, 200.0, 2000.0)
 
-    m_dot_c = pars["m_dot_in"]        # H2
-    m_dot_h = pars["m_dot_in_aire"]   # Aire
+    m_dot_c = pars["m_dot_in"]        #H2
+    m_dot_h = pars["m_dot_in_aire"]   #Aire
     Pc = pars["Pc_avg"]
     Ph = pars["Ph_avg"]
-    Tc_in = pars["Tc_in"]             # entrada fría en x=0
-    Th_in = pars["Th_in"]             # entrada caliente en x=L
+    Tc_in = pars["Tc_in"]             #entrada fría en x=0
+    Th_in = pars["Th_in"]             #entrada caliente en x=L (Van a contracorriente)
 
     Dh_w, A_canal_frio, A_canal_caliente, A_real, C_w, A_IC, v_frio, v_caliente, n_canales, m_totw = pars["geo"]
     L = pars["L"]
 
-    # División por segmentos
+    #Como es 1D a lo largo del intercambiador de calor, acá se va dividiendo en N segmentos para ir resolviendo 
     v_frio_seg     = v_frio     / N
     v_caliente_seg = v_caliente / N
     C_w_seg        = C_w        / N
@@ -156,7 +151,7 @@ def sistema_1D(t, y, pars):
         Tw_j = Tw[j]
         Th_j = Th[j]
 
-        # Propiedades locales
+        #Propiedades locales
         rho_c = PropsSI("Dmass", "T", Tc_j, "P", Pc, "Hydrogen")
         cp_c  = PropsSI("Cpmass","T", Tc_j, "P", Pc, "Hydrogen")
         rho_h = PropsSI("Dmass", "T", Th_j, "P", Ph, "Air")
@@ -165,27 +160,26 @@ def sistema_1D(t, y, pars):
         mcp_c = rho_c * v_frio_seg     * cp_c
         mcp_h = rho_h * v_caliente_seg * cp_h
 
+
+        #Para ocupar las funciones de los coeficientes de transferencia
         h_c, _, _, _ = coef_h_h2(m_dot_c, Tc_j, Pc, A_canal_frio,     Dh_w, L)
         h_h, _, _, _ = coef_h_air(m_dot_h, Th_j, Ph, A_canal_caliente, Dh_w, L)
 
-        # -----------------------------
-        # Upstream (flujo) en contracorriente
-        # -----------------------------
-        # H2 frío: x = 0 -> L
+        
+        #Condiciones de borde
+        #H2 frío: x = 0 -> L
         if j == 0:
-            Tc_up = Tc_in          # entrada fría
+            Tc_up = Tc_in          #entrada fría
         else:
-            Tc_up = Tc[j-1]        # viene del segmento anterior
+            Tc_up = Tc[j-1]        #viene del segmento anterior
 
-        # Aire caliente: x = L -> 0
+        #Aire caliente: x = L -> 0
         if j == (N - 1):
-            Th_up = Th_in          # entrada caliente en el último segmento
+            Th_up = Th_in          #entrada caliente en el último segmento
         else:
-            Th_up = Th[j+1]        # viene del segmento siguiente
+            Th_up = Th[j+1]        #viene del segmento siguiente
 
-        # -----------------------------
-        # Ecuaciones en el segmento j
-        # -----------------------------
+        #sistema de ecuaciones diferenciales 
         dTc_dt[j] = ( m_dot_c*cp_c*(Tc_up - Tc_j) + A_seg*h_c*(Tw_j - Tc_j) ) / mcp_c
         dTh_dt[j] = ( m_dot_h*cp_h*(Th_up - Th_j) - A_seg*h_h*(Th_j - Tw_j) ) / mcp_h
         dTw_dt[j] = ( A_seg*h_h*(Th_j - Tw_j) - A_seg*h_c*(Tw_j - Tc_j) ) / C_w_seg
@@ -193,30 +187,28 @@ def sistema_1D(t, y, pars):
     return np.concatenate([dTc_dt, dTw_dt, dTh_dt])
 
 
-# ============================================================
-# 5) Función para correr la simulación
-# ============================================================
+#5)Función para hacerlo correr 
 def correr_sistema_1D(DELTA_P=500.0, Nseg=10):
-    # Parámetros de entrada
-    # Aire caliente
+    #Parámetros de entrada
+  
     T_in_aire = 750.0 + 273.15      # K
     P_in_aire = 1.0e5               # Pa
     m_dot_in_aire = 0.1885          # kg/s
 
-    # H2 frío
+   
     T_in = 40.0 + 273.15            # K
     P_in = 1.0e5                    # Pa
     m_dot_in = 0.0048               # kg/s
 
-    # Presiones promedio en el intercambiador
+    #Presiones promedio en el intercambiador (Considernado una caida de Delta P en ambos fluidos)
     Ph_avg = P_in_aire - DELTA_P/2.0
     Pc_avg = P_in       - DELTA_P/2.0
 
-    # Geometría
+    #Para ocupar la función de geometría
     geo = geometria()
     Dh_w, A_canal_frio, A_canal_caliente, A_real, C_w, A_IC, v_frio, v_caliente, n_canales, m_totw = geo
 
-    # Condición inicial: todo el HE a las temperaturas de entrada promedio
+    #Se definen las condiciones iniciales 
     Tc0 = np.full(Nseg, T_in)                       # H2 inicial
     Th0 = np.full(Nseg, T_in_aire)                  # aire inicial
     Tw0 = np.full(Nseg, 0.5*(T_in + T_in_aire))     # pared inicial
@@ -235,7 +227,7 @@ def correr_sistema_1D(DELTA_P=500.0, Nseg=10):
         "L": 0.381
     }
 
-    # Tiempo de simulación (dinámica rápida; 0–300 s suele bastar)
+    #Para definir el tiempo de simulación 
     t_span = (0.0, 300.0)
     t_eval = np.linspace(*t_span, 301)
 
@@ -248,16 +240,14 @@ def correr_sistema_1D(DELTA_P=500.0, Nseg=10):
         atol=1e-8
     )
 
-    # Reconstruir matrices de temperatura
+    #Esto es para tener todas las temperaturas a lo largo de N
     N = Nseg
     Tc = sol.y[0:N, :]
     Tw = sol.y[N:2*N, :]
     Th = sol.y[2*N:3*N, :]
 
-    # ---------------------------------------------------------
-    # Gráficos
-    # ---------------------------------------------------------
-    # Evolución temporal de algunos segmentos representativos
+    #Para grficar los resultados
+    #Grafico de como define T en los segmentos (extra, recordar sacar)
     plt.figure(figsize=(8.6, 4.6))
     for j in [0, Nseg//2, Nseg-1]:
         plt.plot(sol.t, Tc[j,:]-273.15, label=f"Tc seg {j}")
@@ -266,9 +256,9 @@ def correr_sistema_1D(DELTA_P=500.0, Nseg=10):
     plt.title("Evolución de T_c en distintos segmentos (H₂ frío)")
     plt.grid(True, alpha=0.3); plt.legend(); plt.tight_layout(); plt.show()
 
-    # Perfil final a lo largo del intercambiador
+    #Gráfico de modelación a lo largo del intercambiador 
     x = np.linspace(0.0, 0.381, Nseg)
-    x_h = x[::-1]                       # invertir para el aire caliente
+    x_h = x[::-1]                       #lo ocupo para invertir la curva del aire caliente (como es contracorriente)
 
     plt.figure(figsize=(8.6, 4.6))
     plt.plot(x, Tc[:,-1]-273.15, "-o", label="T_c final (H₂)")
@@ -284,9 +274,7 @@ def correr_sistema_1D(DELTA_P=500.0, Nseg=10):
     return sol, x, Tc, Tw, Th
 
 
-# ============================================================
-# 6) Ejecución
-# ============================================================
+#6)Comando para ejecutar la función que hace correr el sistema 
 if __name__ == "__main__":
     sol, x, Tc, Tw, Th = correr_sistema_1D(DELTA_P=500.0, Nseg=10)
 
