@@ -1,8 +1,3 @@
-
--   Evaluación de los impactos en Chile
--   Crítica sibre la factibilidad a futuro en el pais
-
-  
 En el repositorio se entrega un modelo termodinámico programado en python para simular el acoplado de un tanque de hidrógeno
 comprimido y un intercambiador de calor de placas corrugadas 1D a lo largo de la longitud y en función del tiempo con configuración contracorriente. 
 
